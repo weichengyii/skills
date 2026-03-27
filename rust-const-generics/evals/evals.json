@@ -1,0 +1,26 @@
+{
+  "skill_name": "rust-const-generics",
+  "evals": [
+    {
+      "id": 1,
+      "name": "ring-buffer",
+      "prompt": "我有一个音频处理的环形缓冲区，目前用 Vec 存储，通道数和缓冲区深度在初始化后就不变了。帮我用 const generics 重构，消除运行时边界检查。\n\n```rust\npub struct RingBuffer {\n    channels: usize,\n    depth: usize,\n    data: Vec<Vec<f32>>,\n    write_pos: Vec<usize>,\n}\n\nimpl RingBuffer {\n    pub fn new(channels: usize, depth: usize) -> Self {\n        Self {\n            channels,\n            depth,\n            data: vec![vec![0.0; depth]; channels],\n            write_pos: vec![0; channels],\n        }\n    }\n\n    pub fn push(&mut self, channel: usize, sample: f32) {\n        assert!(channel < self.channels);\n        let pos = self.write_pos[channel];\n        self.data[channel][pos % self.depth] = sample;\n        self.write_pos[channel] = pos + 1;\n    }\n\n    pub fn read(&self, channel: usize, delay: usize) -> f32 {\n        assert!(channel < self.channels);\n        assert!(delay < self.depth);\n        let pos = (self.write_pos[channel] + self.depth - delay - 1) % self.depth;\n        self.data[channel][pos]\n    }\n\n    pub fn process_block(&mut self, input: &[Vec<f32>], output: &mut [Vec<f32>]) {\n        assert_eq!(input.len(), self.channels);\n        for ch in 0..self.channels {\n            for (i, &sample) in input[ch].iter().enumerate() {\n                self.push(ch, sample);\n                output[ch][i] = self.read(ch, 0);\n            }\n        }\n    }\n}\n```",
+      "expected_output": "A refactored RingBuffer using const generics for CH and DEPTH, with process_block using a method-level const generic for SAMPLES",
+      "files": []
+    },
+    {
+      "id": 2,
+      "name": "matrix-lib",
+      "prompt": "我在写一个小型矩阵库，支持矩阵乘法。想用 const generics 让维度不匹配在编译时报错，而不是运行时 panic。\n\n```rust\npub struct Matrix {\n    rows: usize,\n    cols: usize,\n    data: Vec<f32>,\n}\n\nimpl Matrix {\n    pub fn new(rows: usize, cols: usize) -> Self {\n        Self {\n            rows,\n            cols,\n            data: vec![0.0; rows * cols],\n        }\n    }\n\n    pub fn get(&self, r: usize, c: usize) -> f32 {\n        assert!(r < self.rows && c < self.cols);\n        self.data[r * self.cols + c]\n    }\n\n    pub fn set(&mut self, r: usize, c: usize, val: f32) {\n        assert!(r < self.rows && c < self.cols);\n        self.data[r * self.cols + c] = val;\n    }\n\n    pub fn mul(&self, other: &Matrix) -> Matrix {\n        assert_eq!(self.cols, other.rows, \"dimension mismatch\");\n        let mut result = Matrix::new(self.rows, other.cols);\n        for i in 0..self.rows {\n            for j in 0..other.cols {\n                let mut sum = 0.0;\n                for k in 0..self.cols {\n                    sum += self.get(i, k) * other.get(k, j);\n                }\n                result.set(i, j, sum);\n            }\n        }\n        result\n    }\n\n    pub fn transpose(&self) -> Matrix {\n        let mut result = Matrix::new(self.cols, self.rows);\n        for i in 0..self.rows {\n            for j in 0..self.cols {\n                result.set(j, i, self.get(i, j));\n            }\n        }\n        result\n    }\n}\n```",
+      "expected_output": "A Matrix<ROWS, COLS> with compile-time dimension checking on mul (cols must equal other.rows) and transpose returning Matrix<COLS, ROWS>",
+      "files": []
+    },
+    {
+      "id": 3,
+      "name": "protocol-parser",
+      "prompt": "我在解析一个分层网络协议，每层有固定的 header 大小和 payload 对齐要求。目前这些都是运行时常量，想改成 const generics 让编译器验证。\n\n```rust\npub struct ProtocolLayer {\n    header_size: usize,\n    alignment: usize,\n    buffer: Vec<u8>,\n}\n\nimpl ProtocolLayer {\n    pub fn new(header_size: usize, alignment: usize, max_payload: usize) -> Self {\n        let total = header_size + Self::align_up(max_payload, alignment);\n        Self {\n            header_size,\n            alignment,\n            buffer: vec![0u8; total],\n        }\n    }\n\n    fn align_up(size: usize, align: usize) -> usize {\n        (size + align - 1) / align * align\n    }\n\n    pub fn header(&self) -> &[u8] {\n        &self.buffer[..self.header_size]\n    }\n\n    pub fn payload(&self) -> &[u8] {\n        &self.buffer[self.header_size..]\n    }\n\n    pub fn write_header(&mut self, data: &[u8]) {\n        assert_eq!(data.len(), self.header_size);\n        self.buffer[..self.header_size].copy_from_slice(data);\n    }\n\n    pub fn write_payload(&mut self, data: &[u8]) {\n        let aligned_len = Self::align_up(data.len(), self.alignment);\n        assert!(self.header_size + aligned_len <= self.buffer.len());\n        self.buffer[self.header_size..self.header_size + data.len()].copy_from_slice(data);\n    }\n}\n\npub struct ProtocolStack {\n    layers: Vec<ProtocolLayer>,\n}\n\nimpl ProtocolStack {\n    pub fn total_header_size(&self) -> usize {\n        self.layers.iter().map(|l| l.header_size).sum()\n    }\n}\n```",
+      "expected_output": "A ProtocolLayer<HEADER_SIZE, ALIGNMENT, MAX_PAYLOAD> with const fn align_up, derived buffer sizes in where bounds, and compile-time verified header/payload access",
+      "files": []
+    }
+  ]
+}
