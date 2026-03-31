@@ -6,7 +6,7 @@
 3. [The Where-Bound Trick Explained](#where-bound-trick)
 4. [Composing Const Generics Across Types](#composing)
 5. [SIMD-Friendly Patterns](#simd)
-6. [Common Pitfalls](#pitfalls)
+6. [Common Pitfalls](#pitfalls) (including unconstrained const generics + PhantomData fix)
 7. [Migration: From Dynamic to Const Generic](#migration)
 
 ---
@@ -41,8 +41,18 @@ Place these at the crate root (`lib.rs` or `main.rs`). They apply crate-wide.
 | `const fn` results in type positions | **Nightly** | `buf: [f32; compute(N)]` |
 | `[(); EXPR]:` where bounds | **Nightly** | `where [(); N / 2]:` |
 | Const generic defaults | **Nightly** | `<const N: usize = 64>` |
+| Dependent const generic defaults | **Nightly** | `<const N: usize, const D: usize = { N / 2 }>` |
+| `f32` arithmetic in `const fn` | **Nightly** | `const fn f(x: f32) -> usize { x as usize }` |
+| `f32` as const generic param type | **Not supported** | `<const S: f32>` ❌ (NaN equality) |
 
 **Recommendation:** If you only need simple `<const N: usize>` without arithmetic, stay on stable. If you need derived sizes, accept nightly and use `generic_const_exprs`.
+
+### Important distinctions
+
+**`f32` in const fn vs as const generic type** — these are different things:
+- `const fn foo(scale: f32) -> usize` — ✅ works on nightly, `f32` is a runtime parameter to the const fn
+- `<const SCALE: f32>` — ❌ not allowed, `f32` doesn't implement `ConstParamTy` due to NaN
+- Workaround: pass `f32` into `const fn`, return `usize`, use the `usize` result as a const generic default
 
 ---
 
@@ -99,6 +109,33 @@ fn make_foo<const N: usize>() -> Foo<N> where [(); N * 2]: {
     Foo::new()
 }
 ```
+
+### Eliminating where-bound repetition with const generic defaults
+
+If the repeated where bounds become burdensome, refactor to const generic defaults. The derived sizes become independent const generic parameters with default values, so no where bounds are needed:
+
+```rust
+// Before: where bounds repeated on struct + every impl
+struct Foo<const N: usize> where [(); N * 2]:, [(); N / 4]: {
+    a: [f32; N * 2],
+    b: [f32; N / 4],
+}
+impl<const N: usize> Foo<N> where [(); N * 2]:, [(); N / 4]: { ... }
+
+// After: defaults compute the sizes, no where bounds anywhere
+struct Foo<
+    const N: usize,
+    const A: usize = { N * 2 },
+    const B: usize = { N / 4 },
+> {
+    _phantom: core::marker::PhantomData<[(); N]>,
+    a: [f32; A],
+    b: [f32; B],
+}
+impl<const N: usize, const A: usize, const B: usize> Foo<N, A, B> { ... }
+```
+
+This trades type-parameter verbosity for zero where-bound repetition. Users still write `Foo::<64>` and get `A=128, B=16` automatically, or override with `Foo::<64, 256, 32>`.
 
 ---
 
@@ -239,7 +276,40 @@ where [(); N * 2]:
 }
 ```
 
-### 5. Division by zero in const expressions
+### 5. Unconstrained const generic from default-value-only usage
+
+When a const generic is used only in default-value expressions for other const generics (not in any field type), the compiler reports `unconstrained generic constant` on impl blocks:
+
+```rust
+// ❌ MAX_S only appears in D0's default — unconstrained in impl
+pub struct Foo<const MAX_S: usize, const D0: usize = { MAX_S / 2 }> {
+    buf: [f32; D0],
+}
+
+impl<const MAX_S: usize, const D0: usize> Foo<MAX_S, D0> {
+    fn new() -> Self { ... }  // ERROR: unconstrained generic constant `MAX_S`
+}
+```
+
+The fix: anchor `MAX_S` in a field type via `PhantomData`:
+
+```rust
+// ✅ PhantomData makes MAX_S "used" in the type — zero runtime cost
+pub struct Foo<const MAX_S: usize, const D0: usize = { MAX_S / 2 }> {
+    _phantom: core::marker::PhantomData<[(); MAX_S]>,
+    buf: [f32; D0],
+}
+
+impl<const MAX_S: usize, const D0: usize> Foo<MAX_S, D0> {
+    fn new() -> Self {
+        Self { _phantom: core::marker::PhantomData, buf: [0.0; D0] }
+    }
+}
+```
+
+**Do not** use `[(); MAX_S]` directly as a field — that allocates `MAX_S` bytes on the stack. `PhantomData<[(); MAX_S]>` is zero-sized.
+
+### 6. Division by zero in const expressions
 
 ```rust
 // This compiles but panics if STRIDE == 0 at monomorphization time

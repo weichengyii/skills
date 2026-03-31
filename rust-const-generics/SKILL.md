@@ -98,13 +98,18 @@ The `[(); EXPR]:` idiom forces the compiler to evaluate the const expression and
 
 ### Pattern 4: `const fn` as Type-Level Computation
 
-For complex size calculations, define `const fn` helpers and use them in generic positions. This keeps where-clauses manageable.
+For complex size calculations, define `const fn` helpers and use them in generic positions. This keeps where-clauses manageable. Note: nightly Rust supports **floating-point arithmetic in const fn** — you can use `f32`/`f64` operations inside const functions, which is useful for scale factors, ratios, and other non-integer computations.
 
 ```rust
 /// Compute channel count at a given level of a hierarchical architecture
 pub const fn ch(base: usize, level: usize, max: usize) -> usize {
     let raw = base << level;  // double channels each level
     if raw < max { raw } else { max }
+}
+
+/// f32 arithmetic works in const fn on nightly — useful for scale factors
+pub const fn delay_size(max_samples: usize, scale: f32) -> usize {
+    (max_samples as f32 * scale) as usize
 }
 
 /// Compute sample count at a given level
@@ -233,6 +238,68 @@ impl<const CH: usize, const SAMPLES: usize> LargeModel<CH, SAMPLES> {
 
 **When to use:** When `CH * SAMPLES * size_of::<f32>()` exceeds a few hundred KB.
 
+### Pattern 8: Const Generic Defaults with Dependent Values
+
+When a struct has derived parameters that follow a standard ratio but should be overridable, use const generic defaults that reference earlier parameters. This eliminates repeated where bounds entirely.
+
+```rust
+pub const fn delay_size(max_samples: usize, scale: f32) -> usize {
+    (max_samples as f32 * scale) as usize
+}
+
+pub struct Reverb<
+    const C: usize,
+    const MAX_S: usize,
+    const D0: usize = { delay_size(MAX_S, 0.125) },  // defaults depend on MAX_S
+    const D1: usize = { delay_size(MAX_S, 1.0) },
+    const D2: usize = { delay_size(MAX_S, 0.5) },
+> {
+    _phantom: core::marker::PhantomData<[(); MAX_S]>,  // anchors MAX_S (see Pattern 9)
+    buf0: [f32; D0],
+    buf1: [f32; D1],
+    buf2: [f32; D2],
+}
+```
+
+Users get clean ergonomics — specify only what matters, override when needed:
+```rust
+// Use defaults — only specify C and MAX_S:
+Reverb::<8, 9600>::new()
+
+// Override specific delay sizes:
+Reverb::<8, 9600, 1200, 9600, 4800>::new()
+```
+
+The key advantage over where bounds: the struct definition and **every impl block** are free of `[(); EXPR]:` bounds. The compiler resolves defaults at instantiation time.
+
+**Important:** `f32` cannot be a const generic *parameter type* (it doesn't implement `ConstParamTy` due to NaN equality issues). But `f32` arithmetic works fine *inside* `const fn` used to compute `usize` defaults.
+
+**When to use:** When a type has multiple derived sizes that follow standard ratios, but you want users to be able to override them. Replaces the pattern of repeating the same where bounds on struct + every impl.
+
+### Pattern 9: PhantomData Anchoring for Unused Const Generics
+
+When a const generic appears only in default-value expressions (not in any field type), the compiler reports `unconstrained generic constant` on impl blocks. Fix this by anchoring the parameter with `PhantomData`:
+
+```rust
+// ❌ MAX_S doesn't appear in any field type — impl will fail
+pub struct Foo<const MAX_S: usize, const D: usize = { MAX_S / 2 }> {
+    buf: [f32; D],
+}
+
+// ✅ PhantomData anchors MAX_S at zero cost
+pub struct Foo<const MAX_S: usize, const D: usize = { MAX_S / 2 }> {
+    _phantom: core::marker::PhantomData<[(); MAX_S]>,
+    buf: [f32; D],
+}
+
+// Initialize with type inference — no turbofish needed:
+Self { _phantom: core::marker::PhantomData, buf: [0.0; D] }
+```
+
+**Why not `[(); MAX_S]` directly?** That would occupy `MAX_S` bytes of memory. `PhantomData<[(); MAX_S]>` is zero-sized — it only exists in the type system.
+
+**When to use:** Whenever a const generic is "consumed" only by default-value expressions on other const generics, making it invisible to the field types.
+
 ## Decision Guide
 
 ```
@@ -240,7 +307,10 @@ Is the parameter fixed for the type's lifetime?
 ├── Yes → Struct-level const generic (Pattern 1)
 │   └── Is any field size derived from this param?
 │       ├── Simple expression → [(); EXPR]: where bound (Pattern 3)
-│       └── Complex formula → const fn helper (Pattern 4)
+│       ├── Complex formula → const fn helper (Pattern 4)
+│       └── Multiple derived sizes with standard ratios?
+│           └── Yes → Const generic defaults (Pattern 8)
+│               └── Base param unused in fields? → PhantomData anchor (Pattern 9)
 └── No, varies per call → Method-level const generic (Pattern 2)
 
 Need a Vec of differently-parameterized items?
@@ -256,7 +326,10 @@ Array too large for stack?
 1. **Do you actually need compile-time sizes?** If the size is truly dynamic (user input, file-dependent), use `Vec`. Const generics are for structurally fixed dimensions.
 2. **Nightly required?** Basic `<const N: usize>` is stable. Arithmetic on const generics (`generic_const_exprs`) requires nightly.
 3. **Monomorphization cost acceptable?** Each unique combination of const values generates a new copy of the code. For 2-3 parameters with small value ranges, this is fine. For combinatorial explosions (many params, many values), consider whether the performance gain justifies the binary size.
-4. **Are where-bounds getting unwieldy?** If you have more than ~5 where bounds, extract size computation into `const fn` helpers (Pattern 4) and/or add intermediate type aliases.
+4. **Are where-bounds getting unwieldy?** If you have more than ~5 where bounds, consider:
+   - Extract size computation into `const fn` helpers (Pattern 4)
+   - Use const generic defaults to eliminate where bounds entirely (Pattern 8 + 9)
+   - Add intermediate type aliases
 
 ## Detailed Reference
 
